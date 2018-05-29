@@ -91,11 +91,12 @@ async function processCSV(key) {
 }
 
 async function S3Delete(keys) {
+	let partKeys = keys.splice(0, 1000);
 	
-	numDeleted += keys.length;
-	console.log('Deleting (' + numDeleted + ') ' + keys.join(','));
+	numDeleted += partKeys.length;
+	console.log('Deleting (' + numDeleted + ') ' + partKeys.join(','));
 	
-	let objects = keys.map(key => {
+	let objects = partKeys.map(key => {
 		Key: key
 	});
 	
@@ -106,6 +107,10 @@ async function S3Delete(keys) {
 	};
 	
 	// await S3ZFS.deleteObjects(params).promise();
+	
+	if (keys.length) {
+		await S3Delete(keys);
+	}
 }
 
 // Is it possible that a record in storage items exists, but file in S3 no. Previous deletes?
