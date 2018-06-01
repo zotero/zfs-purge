@@ -129,6 +129,23 @@ async function purgeGroup(group) {
 		[hash]
 	);
 	
+	// This is a very basic solution, and it would be better to do everything in one query,
+	// but since all rows for the hash are already locked, we can just check if at least
+	// one storageFiles row was added/updated in the last month.
+	let [res2] = await db.execute(`
+		SELECT 1
+		FROM storageFiles
+		WHERE hash = ?
+		AND lastAdded BETWEEN SUBDATE(CURDATE(), INTERVAL 1 MONTH) AND NOW()
+		LIMIT 1`,
+		[hash]
+	);
+	
+	if(res2.length) {
+		await db.commit();
+		return;
+	}
+	
 	let deleteKeys = [];
 	// If none of libraries have the file, delete all keys from S3
 	if (res[0].libraryID === null) {
