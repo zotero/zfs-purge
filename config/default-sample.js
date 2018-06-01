@@ -1,5 +1,6 @@
 module.exports = {
 	actuallyDelete: false,
+	deletedLog: 'deleted.txt',
 	inventoryId: '',
 	S3ZFS: {
 		params: {

@@ -28,6 +28,7 @@ const parse = require('csv-parse/lib/sync');
 const config = require('config');
 const AWS = require('aws-sdk');
 const mysql = require('mysql2/promise');
+const fs = require('fs');
 
 const S3ZFS = new AWS.S3(config.get('S3ZFS'));
 const S3Inventory = new AWS.S3(config.get('S3Inventory'));
@@ -35,6 +36,10 @@ const S3Inventory = new AWS.S3(config.get('S3Inventory'));
 let db = null;
 
 let numDeleted = 0;
+let CSVCount = 0;
+let CSVCurrent = 0;
+let CSVLines = 0;
+let CSVLinesProcessed = 0;
 
 async function getList(prefix, token) {
 	let params = {Prefix: prefix};
@@ -71,8 +76,11 @@ async function processCSV(key) {
 	let csv = zlib.gunzipSync(result.Body);
 	let rows = parse(csv);
 	
+	CSVLines = rows.length;
+	
 	let group = [];
 	for (let row of rows) {
+		CSVLinesProcessed++;
 		let key = row[1];
 		let hash = key.split('/')[0];
 		if (!/^[a-z0-9]{32}$/.test(hash)) continue;
@@ -157,7 +165,9 @@ async function purgeGroup(group) {
 		
 		if (deleteKeys.length) {
 			numDeleted += deleteKeys.length;
-			console.log('Deleting (' + numDeleted + ') ' + deleteKeys.join(','));
+			if (config.get('deletedLog')) {
+				fs.appendFileSync(config.get('deletedLog'), deleteKeys.join('\n') + '\n\n');
+			}
 			
 			if (config.get('actuallyDelete')) {
 				// Firstly delete all storageFile rows that are no longer used in storageFileLibraries
@@ -187,6 +197,14 @@ async function purgeGroup(group) {
 	await db.commit();
 }
 
+function printStatus() {
+	console.log({
+		CSV: CSVCurrent + '/' + CSVCount,
+		CSVLine: CSVLinesProcessed + '/' + CSVLines,
+		totalDeleted: numDeleted
+	});
+}
+
 async function main() {
 	db = await mysql.createConnection({
 		host: config.get('masterHost'),
@@ -195,6 +213,10 @@ async function main() {
 		database: config.get('masterDatabase')
 	});
 	
+	if (config.get('deletedLog')) {
+		fs.writeFileSync(config.get('deletedLog'), '');
+	}
+	
 	let manifest = await getManifest();
 	
 	if (!manifest) {
@@ -202,13 +224,20 @@ async function main() {
 		return;
 	}
 	
-	console.log('CSV files in manifest: ' + manifest.files.length);
+	CSVCount = manifest.files.length;
 	
-	for (let i = 0; i < manifest.files.length; i++) {
-		let file = manifest.files[i];
-		console.log('Processing ' + (i + 1) + '/' + manifest.files.length + ': ' + file.key);
+	let statusInterval = setInterval(printStatus, 1000);
+	
+	for (let file of manifest.files) {
+		CSVCurrent++;
 		await processCSV(file.key);
 	}
+	
+	await db.close();
+	
+	clearInterval(statusInterval);
+	
+	printStatus();
 }
 
 main();
