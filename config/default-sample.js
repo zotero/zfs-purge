@@ -1,4 +1,5 @@
 module.exports = {
+	actuallyDelete: false,
 	inventoryId: '',
 	S3ZFS: {
 		params: {

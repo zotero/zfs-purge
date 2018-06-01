@@ -93,9 +93,6 @@ async function processCSV(key) {
 async function S3Delete(keys) {
 	let partKeys = keys.splice(0, 1000);
 	
-	numDeleted += partKeys.length;
-	console.log('Deleting (' + numDeleted + ') ' + partKeys.join(','));
-	
 	let objects = partKeys.map(key => {
 		Key: key
 	});
@@ -106,69 +103,87 @@ async function S3Delete(keys) {
 		}
 	};
 	
-	// await S3ZFS.deleteObjects(params).promise();
+	await S3ZFS.deleteObjects(params).promise();
 	
 	if (keys.length) {
 		await S3Delete(keys);
 	}
 }
 
-// Is it possible that a record in storage items exists, but file in S3 no. Previous deletes?
 async function purgeGroup(group) {
 	let hash = group[0].split('/')[0];
 	
 	await db.beginTransaction();
 	
-	// Check if the file is still in use and lock all storageFiles rows containing the hash
-	let [res] = await db.execute(`
-		SELECT MAX(sfl.libraryID) AS libraryID
-		FROM storageFiles sf
-		LEFT JOIN storageFileLibraries sfl ON (sfl.storageFileID = sf.storageFileID)
-		WHERE hash = ?
-		FOR UPDATE`,
-		[hash]
-	);
-	
-	// This is a very basic solution, and it would be better to do everything in one query,
-	// but since all rows for the hash are already locked, we can just check if at least
-	// one storageFiles row was added/updated in the last month.
-	let [res2] = await db.execute(`
-		SELECT 1
-		FROM storageFiles
-		WHERE hash = ?
-		AND lastAdded BETWEEN SUBDATE(CURDATE(), INTERVAL 1 MONTH) AND NOW()
-		LIMIT 1`,
-		[hash]
-	);
-	
-	if(res2.length) {
-		await db.commit();
-		return;
-	}
-	
-	let deleteKeys = [];
-	// If none of libraries have the file, delete all keys from S3
-	if (res[0].libraryID === null) {
-		deleteKeys = group;
-	}
-	// Otherwise just delete the redundant copies
-	else if (group.length >= 2) {
-		// Only keep the shortest key. I.e. 'bucket/hash' if exists,
-		// otherwise just 'bucket/hash/shortest_filename'
-		group.sort((a, b) => a.length - b.length);
-		deleteKeys = group.slice(1);
-	}
-	
-	if (deleteKeys.length) {
-		await S3Delete(deleteKeys);
-		
-		// Delete all storageFile rows that are no longer used in storageFileLibraries
-		await db.execute(`
-			DELETE sf FROM storageFiles sf
+	try {
+		// Check if the file is still in use and lock all storageFiles rows containing the hash
+		let [res] = await db.execute(`
+			SELECT MAX(sfl.libraryID) AS libraryID
+			FROM storageFiles sf
 			LEFT JOIN storageFileLibraries sfl ON (sfl.storageFileID = sf.storageFileID)
-			WHERE hash = ? AND sfl.libraryID IS NULL`,
+			WHERE hash = ?
+			FOR UPDATE`,
 			[hash]
 		);
+		
+		// This is a very basic solution, and it would be better to do everything in one query,
+		// but since all rows for the hash are already locked, we can just check if at least
+		// one storageFiles row was added/updated in the last month.
+		let [res2] = await db.execute(`
+			SELECT 1
+			FROM storageFiles
+			WHERE hash = ?
+			AND lastAdded BETWEEN SUBDATE(CURDATE(), INTERVAL 1 MONTH) AND NOW()
+			LIMIT 1`,
+			[hash]
+		);
+		
+		if (res2.length) {
+			// Commit to release locks
+			await db.commit();
+			return;
+		}
+		
+		let deleteKeys = [];
+		// If none of libraries have the file, delete all keys from S3
+		if (res[0].libraryID === null) {
+			deleteKeys = group;
+		}
+		// Otherwise just delete the redundant copies
+		else if (group.length >= 2) {
+			// Only keep the shortest key. I.e. 'bucket/hash' if exists,
+			// otherwise just 'bucket/hash/shortest_filename'
+			group.sort((a, b) => a.length - b.length);
+			deleteKeys = group.slice(1);
+		}
+		
+		if (deleteKeys.length) {
+			numDeleted += deleteKeys.length;
+			console.log('Deleting (' + numDeleted + ') ' + deleteKeys.join(','));
+			
+			if (config.get('actuallyDelete')) {
+				// Firstly delete all storageFile rows that are no longer used in storageFileLibraries
+				await db.execute(`
+					DELETE sf FROM storageFiles sf
+					LEFT JOIN storageFileLibraries sfl ON (sfl.storageFileID = sf.storageFileID)
+					WHERE hash = ? AND sfl.libraryID IS NULL`,
+					[hash]
+				);
+				
+				// If rows are deleted from storageFiles, but fail to be deleted from S3,
+				// nothing bad happens - the S3 files will be deleted the next time.
+				// But if S3 deletion would succeed and storageFiles deletion would fail,
+				// that would result to new uploads assuming that the file still exists in S3.
+				// Therefore even if S3 fails (fail doesn't necessarily mean files aren't deleted),
+				// we have to make sure the storageFiles deletion is committed.
+				
+				// Then try to delete files form S3
+				await S3Delete(deleteKeys);
+			}
+		}
+	}
+	catch (err) {
+		console.log(err);
 	}
 	
 	await db.commit();
@@ -183,6 +198,11 @@ async function main() {
 	});
 	
 	let manifest = await getManifest();
+	
+	if (!manifest) {
+		console.log('Inventory manifest not found');
+		return;
+	}
 	
 	console.log('CSV files in manifest: ' + manifest.files.length);
 	
