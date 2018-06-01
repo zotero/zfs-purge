@@ -93,9 +93,7 @@ async function processCSV(key) {
 async function S3Delete(keys) {
 	let partKeys = keys.splice(0, 1000);
 	
-	let objects = partKeys.map(key => {
-		Key: key
-	});
+	let objects = partKeys.map(key => ({Key: key}));
 	
 	let params = {
 		Delete: {
