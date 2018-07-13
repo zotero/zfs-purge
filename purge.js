@@ -41,6 +41,14 @@ let CSVCurrent = 0;
 let CSVLines = 0;
 let CSVLinesProcessed = 0;
 
+/**
+ * Get all keys by prefix.
+ * One request can return only a limited count of keys,
+ * therefore do recursion with continuation token
+ * @param prefix
+ * @param token
+ * @return {Promise<S3.ObjectList>}
+ */
 async function getList(prefix, token) {
 	let params = {Prefix: prefix};
 	if (token) params.ContinuationToken = token;
@@ -52,6 +60,10 @@ async function getList(prefix, token) {
 	return list;
 }
 
+/**
+ * Get a manifest file containing a list of all CSVs
+ * @return {Promise<*>}
+ */
 async function getManifest() {
 	// List keys that only start with a date
 	let prefix = config.get('S3ZFS').params.Bucket + '/' + config.get('inventoryId') + '/20';
@@ -71,6 +83,23 @@ async function getManifest() {
 	return manifest;
 }
 
+/**
+ * Process CSV file.
+ * Assumes that keys are sorted in CSV, combines the same hash keys
+ * into groups, and runs purge operation on that group.
+ * This function processes one CSV at the time, which means a group,
+ * that stretches over two files, will result to two partial groups.
+ *
+ * Example of a group:
+ * 697ffb8a8eda3418ceb6cbf5f2005c63
+ * 697ffb8a8eda3418ceb6cbf5f2005c63/Some article.pdf
+ * 697ffb8a8eda3418ceb6cbf5f2005c63/Some article(1).pdf
+ * 697ffb8a8eda3418ceb6cbf5f2005c63/c/SNPHECC9.zip
+ * 697ffb8a8eda3418ceb6cbf5f2005c63/c/EHHNB7WA.zip
+ *
+ * @param key
+ * @return {Promise<void>}
+ */
 async function processCSV(key) {
 	let result = await S3Inventory.getObject({Key: key}).promise();
 	let csv = zlib.gunzipSync(result.Body);
@@ -83,10 +112,15 @@ async function processCSV(key) {
 		CSVLinesProcessed++;
 		let key = row[1];
 		let hash = key.split('/')[0];
+		
+		// Make sure the key starts with a hash
 		if (!/^[a-z0-9]{32}$/.test(hash)) continue;
 		
+		// Separate and purge the group if the current hash isn't equal to the group hash
 		if (group.length && group[0].split('/')[0] !== hash) {
+			// Process the group
 			await purgeGroup(group);
+			// Start a new group
 			group = [];
 		}
 		
@@ -98,6 +132,14 @@ async function processCSV(key) {
 	}
 }
 
+/**
+ * Delete objects from s3.
+ * S3 API can delete up to 1000 keys per request,
+ * therefore we do recursion here
+ * @param keys
+ * @return {Promise<void>}
+ * @constructor
+ */
 async function S3Delete(keys) {
 	let partKeys = keys.splice(0, 1000);
 	
