@@ -174,47 +174,56 @@ async function purgeGroup(group) {
 			[hash]
 		);
 		
-		// This is a very basic solution, and it would be better to do everything in one query,
-		// but since all rows for the hash are already locked, we can just check if at least
-		// one storageFiles row was added/updated in the last month.
-		let [res2] = await db.execute(`
+		let using = true;
+		// If none of libraries have the file, the file is no longer in use
+		if (res[0].libraryID === null) {
+			using = false;
+		}
+		
+		let usedLastMonth = false;
+		
+		// If the file is no longer in use, check if it was used in the last month
+		if (!using) {
+			// Since all rows for the hash are already locked, we just check if at least
+			// one storageFiles row was added/updated in the last month.
+			let [res2] = await db.execute(`
 			SELECT 1
 			FROM storageFiles
 			WHERE hash = ?
 			AND lastAdded BETWEEN SUBDATE(CURDATE(), INTERVAL 1 MONTH) AND NOW()
 			LIMIT 1`,
-			[hash]
-		);
-		
-		if (res2.length) {
-			// Commit to release locks
-			await db.commit();
-			return;
+				[hash]
+			);
+			
+			if (res2.length) {
+				usedLastMonth = true;
+			}
 		}
 		
-		let deleteKeys = [];
-		// If none of libraries have the file, delete all keys from S3
-		if (res[0].libraryID === null) {
-			deleteKeys = group;
-		}
-		// Otherwise just delete the redundant copies
-		else if (group.length >= 2) {
-			// Only keep the shortest key. I.e. 'bucket/hash' if exists,
-			// otherwise just 'bucket/hash/shortest_filename'
-			group.sort((a, b) => a.length - b.length);
-			deleteKeys = group.slice(1);
-		}
-		
-		if (deleteKeys.length) {
+		// DELETE EVERYTHING, if the file is not in use and haven't been used in the last month
+		if (!using && !usedLastMonth) {
+			let deleteKeys = group;
+			
 			numDeleted += deleteKeys.length;
 			if (config.get('deletedLog')) {
 				fs.appendFileSync(config.get('deletedLog'), deleteKeys.join('\n') + '\n\n');
 			}
 			
-			if (config.get('actuallyDelete')) {
-				// Firstly delete all storageFile rows that are no longer used in storageFileLibraries
+			if (config.get('actuallyDelete') === true) {
+				// Backup storageFiles rows that will be deleted
 				await db.execute(`
-					DELETE sf FROM storageFiles sf
+					REPLACE INTO storageFilesDeleted
+					SELECT sf.*
+					FROM storageFiles sf
+					LEFT JOIN storageFileLibraries sfl ON (sfl.storageFileID = sf.storageFileID)
+					WHERE hash = ? AND sfl.libraryID IS NULL`,
+					[hash]
+				);
+				
+				// Delete all storageFile rows that are no longer used in storageFileLibraries
+				await db.execute(`
+					DELETE sf
+					FROM storageFiles sf
 					LEFT JOIN storageFileLibraries sfl ON (sfl.storageFileID = sf.storageFileID)
 					WHERE hash = ? AND sfl.libraryID IS NULL`,
 					[hash]
@@ -227,8 +236,23 @@ async function purgeGroup(group) {
 				// Therefore even if S3 fails (fail doesn't necessarily mean files aren't deleted),
 				// we have to make sure the storageFiles deletion is committed.
 				
-				// Then try to delete files form S3
-				await S3Delete(deleteKeys);
+				// await S3Delete(deleteKeys); <--- FOR NOW DO NOT DELETE THE ACTUAL FILES FROM S3
+			}
+		}
+		// DELETE DUPLICATES
+		else if (group.length >= 2) {
+			// Only keep the shortest key. I.e. 'bucket/hash' if exists,
+			// otherwise just 'bucket/hash/shortest_filename'
+			group.sort((a, b) => a.length - b.length);
+			let deleteKeys = group.slice(1);
+			
+			numDeleted += deleteKeys.length;
+			if (config.get('deletedLog')) {
+				fs.appendFileSync(config.get('deletedLog'), deleteKeys.join('\n') + '\n\n');
+			}
+			
+			if (config.get('actuallyDelete') === true) {
+				// await S3Delete(deleteKeys); <--- FOR NOW DO NOT DELETE THE ACTUAL FILES FROM S3
 			}
 		}
 	}
