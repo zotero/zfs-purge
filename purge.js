@@ -164,8 +164,29 @@ async function purgeGroup(group) {
 	await db.beginTransaction();
 	
 	try {
+		let res;
+		
+		// Selects and locks all storageUploadQueue table rows containing
+		// the specific hash and initiated in the last month.
+		// Prevents new rows creation
+		[res] = await db.execute(`
+			SELECT COUNT(*) AS count
+			FROM storageUploadQueue
+			WHERE hash = ?
+			AND time > SUBDATE(CURDATE(), INTERVAL 1 MONTH)
+			FOR UPDATE`,
+			[hash]
+		);
+		
+		// If at least one upload is initiated in the last month, we skip this hash
+		if (res[0].count) {
+			console.log('Skipping hash from storageUploadQueue: ' + hash);
+			await db.commit();
+			return;
+		}
+		
 		// Check if the file is still in use and lock all storageFiles rows containing the hash
-		let [res] = await db.execute(`
+		[res] = await db.execute(`
 			SELECT MAX(sfl.libraryID) AS libraryID
 			FROM storageFiles sf
 			LEFT JOIN storageFileLibraries sfl ON (sfl.storageFileID = sf.storageFileID)
