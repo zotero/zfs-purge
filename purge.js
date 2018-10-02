@@ -257,7 +257,7 @@ async function purgeGroup(group) {
 				// Therefore even if S3 fails (fail doesn't necessarily mean files aren't deleted),
 				// we have to make sure the storageFiles deletion is committed.
 				
-				// await S3Delete(deleteKeys); <--- FOR NOW DO NOT DELETE THE ACTUAL FILES FROM S3
+				await S3Delete(deleteKeys);
 			}
 		}
 		// DELETE DUPLICATES
@@ -273,7 +273,7 @@ async function purgeGroup(group) {
 			}
 			
 			if (config.get('actuallyDelete') === true) {
-				// await S3Delete(deleteKeys); <--- FOR NOW DO NOT DELETE THE ACTUAL FILES FROM S3
+				await S3Delete(deleteKeys);
 			}
 		}
 	}
